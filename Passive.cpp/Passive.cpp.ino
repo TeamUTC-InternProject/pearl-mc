@@ -1,6 +1,6 @@
 /*
   passive.cpp - Library for receiving
-  signals from the CP. 
+  signals from the CP.
 */
 #include "Arduino.h"
 #include "Passive.h"
@@ -9,7 +9,7 @@
 
 Passive::Passive()
 {
-  
+
 }
 
 int Passive::detect(int ADC_val)
@@ -22,12 +22,12 @@ int Passive::detect(int ADC_val)
 int Passive::classifySignal(int ADC_val)
 {
   /*Series of if statements here*/
-  return 0;  
+  return 0;
 }
 
 void Passive::fourierTransform()
 {
-  
+
 }
 
 void Passive::contactGUI(int classif_num)
@@ -54,10 +54,7 @@ void Passive::sdWrite(int classif_num)
   if (myFile) {
     Serial.print("Writing to test.txt...");
     /*Must convert classif_num to string*/
-<<<<<<< HEAD
     itoa(classif_num, classif_str, 10);
-=======
->>>>>>> 903de1795b91964f8ac3a3ed71712a221510f4d1
     myFile.println(classif_num);
     // close the file:
     myFile.close();
@@ -68,4 +65,3 @@ void Passive::sdWrite(int classif_num)
   }
 
 }
-
