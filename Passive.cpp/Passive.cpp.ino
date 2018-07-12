@@ -54,7 +54,10 @@ void Passive::sdWrite(int classif_num)
   if (myFile) {
     Serial.print("Writing to test.txt...");
     /*Must convert classif_num to string*/
+<<<<<<< HEAD
     itoa(classif_num, classif_str, 10);
+=======
+>>>>>>> 903de1795b91964f8ac3a3ed71712a221510f4d1
     myFile.println(classif_num);
     // close the file:
     myFile.close();
