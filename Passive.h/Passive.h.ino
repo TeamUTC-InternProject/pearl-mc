@@ -5,16 +5,18 @@
 #ifndef Passive_h
 #define Passive_h
 #include "Arduino.h"
+#include <SD.h>
+#include <arm_math.h>
 
 class Passive
 {
   public:
-    Passive(int );
-    void processSignal();
+    Passive();
+    int detect(int ADC_val);
+    int classifySignal(int ADC_val);
     void fourierTransform();
-    void sendDataToGUI();
-  private:
-    int _pin;
+    void contactGUI(int classif_num);
+    void sdWrite(int classif_num);
 };
 
 #endif
