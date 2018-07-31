@@ -20,4 +20,3 @@ btn1 = Button(led_control_window, text="Passive", command=led_off)
 btn.grid(row=0,column=1)
 btn1.grid(row=1, column=1)
 led_control_window.mainloop()
-

@@ -1,4 +1,4 @@
-// Audio Tone Input
+// Audio Spectrum Display
 // Copyright 2013 Tony DiCola (tony@tonydicola.com)
 
 // This code is part of the guide at http://learn.adafruit.com/fft-fun-with-fourier-transforms/
@@ -7,6 +7,26 @@
 #include <arm_math.h>
 #include <Adafruit_NeoPixel.h>
 
+#include <Audio.h>
+#include <Wire.h>
+#include <SPI.h>
+#include <SD.h>
+#include <SerialFlash.h>
+
+#define SDCARD_CS_PIN    BUILTIN_SDCARD
+#define SDCARD_MOSI_PIN  11  // not actually used
+#define SDCARD_SCK_PIN   13  // not actually used
+
+AudioPlaySdRaw            playRaw1;          
+AudioInputAnalog          adc1; 
+AudioAnalyzeFFT1024       myFFT;
+AudioAnalyzeNoteFrequency signalFreq;
+AudioOutputAnalog         dac1; 
+
+//Waveform used for testing  
+AudioSynthWaveformSine sinewave;
+
+AudioConnection patchCord3(sinewave, 0, dac1, 0);
 
 ////////////////////////////////////////////////////////////////////////////////
 // CONIFIGURATION 
@@ -14,15 +34,10 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 int SAMPLE_RATE_HZ = 9000;             // Sample rate of the audio in hertz.
-const int TONE_LOWS[] = {              // Lower bound (in hz) of each tone in the input sequence.
-  1723, 1934, 1512, 738, 1125
-};
-const int TONE_HIGHS[] = {             // Upper bound (in hz) of each tone in the input sequence.
-  1758, 1969, 1546, 773, 1160
-};
-int TONE_ERROR_MARGIN_HZ = 50;         // Allowed fudge factor above and below the bounds for each tone input.
-int TONE_WINDOW_MS = 4000;             // Maximum amount of milliseconds allowed to enter the full sequence.
-float TONE_THRESHOLD_DB = 10.0;        // Threshold (in decibels) each tone must be above other frequencies to count.
+float SPECTRUM_MIN_DB = 30.0;          // Audio intensity (in decibels) that maps to low LED brightness.
+float SPECTRUM_MAX_DB = 60.0;          // Audio intensity (in decibels) that maps to high LED brightness.
+int LEDS_ENABLED = 1;                  // Control if the LED's should display the spectrum or not.  1 is true, 0 is false.
+                                       // Useful for turning the LED display on and off with commands from the serial port.
 const int FFT_SIZE = 256;              // Size of the FFT.  Realistically can only be at most 256 
                                        // without running out of memory for buffers and other state.
 const int AUDIO_INPUT_PIN = 14;        // Input ADC pin for audio data.
@@ -34,6 +49,8 @@ const int NEO_PIXEL_COUNT = 4;         // Number of neo pixels.  You should be a
                                        // any other changes to the program.
 const int MAX_CHARS = 65;              // Max size of the input command buffer
 
+long previousMillis = 0;
+long interval = 5000;
 
 ////////////////////////////////////////////////////////////////////////////////
 // INTERNAL STATE
@@ -46,8 +63,8 @@ float magnitudes[FFT_SIZE];
 int sampleCounter = 0;
 Adafruit_NeoPixel pixels = Adafruit_NeoPixel(NEO_PIXEL_COUNT, NEO_PIXEL_PIN, NEO_GRB + NEO_KHZ800);
 char commandBuffer[MAX_CHARS];
-int tonePosition = 0;
-unsigned long toneStart = 0;
+float frequencyWindow[NEO_PIXEL_COUNT+1];
+float hues[NEO_PIXEL_COUNT];
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -55,6 +72,31 @@ unsigned long toneStart = 0;
 ////////////////////////////////////////////////////////////////////////////////
 
 void setup() {
+// Audio connections require memory to work.  For more
+  // detailed information, see the MemoryAndCpuUsage example
+  AudioMemory(30);
+
+//  //Begin the Center Frequency Determination Algorithm
+//  signalFreq.begin(.15);
+//
+//  // Configure the window algorithm to use for the FFT
+//  myFFT.windowFunction(AudioWindowHanning1024);
+//  //myFFT.windowFunction(NULL);
+
+    // Initialize the SD card
+  SPI.setMOSI(SDCARD_MOSI_PIN);
+  SPI.setSCK(SDCARD_SCK_PIN);
+  if (!(SD.begin(SDCARD_CS_PIN))) {
+    // stop here if no SD card, but print a message
+    while (1) {
+      Serial.println("Unable to access the SD card");
+      delay(500);
+    }
+  }
+
+  sinewave.amplitude(10);
+  sinewave.frequency(200);
+  
   // Set up serial port.
   Serial.begin(38400);
   
@@ -74,11 +116,22 @@ void setup() {
   // Clear the input command buffer
   memset(commandBuffer, 0, sizeof(commandBuffer));
   
+  // Initialize spectrum display
+  spectrumSetup();
+  
   // Begin sampling audio
   samplingBegin();
 }
 
 void loop() {
+
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - previousMillis > interval) {
+    previousMillis = currentMillis;
+    startPlaying();  
+  }
+  
   // Calculate FFT if a full sample is available.
   if (samplingIsDone()) {
     // Run FFT on sample data.
@@ -87,9 +140,11 @@ void loop() {
     arm_cfft_radix4_f32(&fft_inst, samples);
     // Calculate magnitude of complex numbers output by the FFT.
     arm_cmplx_mag_f32(samples, magnitudes, FFT_SIZE);
-
-    // Detect tone sequence.
-    toneLoop();
+  
+    if (LEDS_ENABLED == 1)
+    {
+      spectrumLoop();
+    }
   
     // Restart audio sampling.
     samplingBegin();
@@ -128,9 +183,46 @@ int frequencyToBin(float frequency) {
   return int(frequency / binFrequency);
 }
 
-// Convert intensity to decibels
-float intensityDb(float intensity) {
-  return 20.0*log10(intensity);
+// Convert from HSV values (in floating point 0 to 1.0) to RGB colors usable
+// by neo pixel functions.
+uint32_t pixelHSVtoRGBColor(float hue, float saturation, float value) {
+  // Implemented from algorithm at http://en.wikipedia.org/wiki/HSL_and_HSV#From_HSV
+  float chroma = value * saturation;
+  float h1 = float(hue)/60.0;
+  float x = chroma*(1.0-fabs(fmod(h1, 2.0)-1.0));
+  float r = 0;
+  float g = 0;
+  float b = 0;
+  if (h1 < 1.0) {
+    r = chroma;
+    g = x;
+  }
+  else if (h1 < 2.0) {
+    r = x;
+    g = chroma;
+  }
+  else if (h1 < 3.0) {
+    g = chroma;
+    b = x;
+  }
+  else if (h1 < 4.0) {
+    g = x;
+    b = chroma;
+  }
+  else if (h1 < 5.0) {
+    r = x;
+    b = chroma;
+  }
+  else // h1 <= 6.0
+  {
+    r = chroma;
+    b = x;
+  }
+  float m = value - chroma;
+  r += m;
+  g += m;
+  b += m;
+  return pixels.Color(int(255*r), int(255*g), int(255*b));
 }
 
 
@@ -138,54 +230,41 @@ float intensityDb(float intensity) {
 // SPECTRUM DISPLAY FUNCTIONS
 ///////////////////////////////////////////////////////////////////////////////
 
-void toneLoop() {
-  // Calculate the low and high frequency bins for the currently expected tone.
-  int lowBin = frequencyToBin(TONE_LOWS[tonePosition] - TONE_ERROR_MARGIN_HZ);
-  int highBin = frequencyToBin(TONE_HIGHS[tonePosition] + TONE_ERROR_MARGIN_HZ);
-  // Get the average intensity of frequencies inside and outside the tone window.
-  float window, other;
-  windowMean(magnitudes, lowBin, highBin, &window, &other);
-  window = intensityDb(window);
-  other = intensityDb(other);
-  // Check if tone intensity is above the threshold to detect a step in the sequence.
-  if ((window - other) >= TONE_THRESHOLD_DB) {
-    // Start timing the window if this is the first in the sequence.
-    unsigned long time = millis();
-    if (tonePosition == 0) {
-      toneStart = time;
-    }
-    // Increment key position if still within the window of key input time.
-    if (toneStart + TONE_WINDOW_MS > time) {
-      tonePosition += 1;
-    }
-    else {
-      // Outside the window of key input time, reset back to the beginning key.
-      tonePosition = 0;
-    }
+void spectrumSetup() {
+  // Set the frequency window values by evenly dividing the possible frequency
+  // spectrum across the number of neo pixels.
+  float windowSize = (SAMPLE_RATE_HZ / 2.0) / float(NEO_PIXEL_COUNT);
+  for (int i = 0; i < NEO_PIXEL_COUNT+1; ++i) {
+    frequencyWindow[i] = i*windowSize;
   }
-  // Check if the entire sequence was passed through.
-  if (tonePosition >= sizeof(TONE_LOWS)/sizeof(int)) {
-    toneDetected();
-    tonePosition = 0;
+  // Evenly spread hues across all pixels.
+  for (int i = 0; i < NEO_PIXEL_COUNT; ++i) {
+    hues[i] = 360.0*(float(i)/float(NEO_PIXEL_COUNT-1));
   }
 }
 
-void toneDetected() {
-  // Flash the LEDs four times.
-  int pause = 250;
-  for (int i = 0; i < 4; ++i) {
-    for (int j = 0; j < NEO_PIXEL_COUNT; ++j) {
-      pixels.setPixelColor(j, pixels.Color(255, 0, 0));
-    }
-    pixels.show();
-    delay(pause);
-    for (int j = 0; j < NEO_PIXEL_COUNT; ++j) {
-      pixels.setPixelColor(j, 0);
-    }
-    pixels.show();
-    delay(pause);
+void spectrumLoop() {
+  // Update each LED based on the intensity of the audio 
+  // in the associated frequency window.
+  float intensity, otherMean;
+  for (int i = 0; i < NEO_PIXEL_COUNT; ++i) {
+    windowMean(magnitudes, 
+               frequencyToBin(frequencyWindow[i]),
+               frequencyToBin(frequencyWindow[i+1]),
+               &intensity,
+               &otherMean);
+    // Convert intensity to decibels.
+    intensity = 20.0*log10(intensity);
+    // Scale the intensity and clamp between 0 and 1.0.
+    intensity -= SPECTRUM_MIN_DB;
+    intensity = intensity < 0.0 ? 0.0 : intensity;
+    intensity /= (SPECTRUM_MAX_DB-SPECTRUM_MIN_DB);
+    intensity = intensity > 1.0 ? 1.0 : intensity;
+    pixels.setPixelColor(i, pixelHSVtoRGBColor(hues[i], 1.0, intensity));
   }
+  pixels.show();
 }
+
 
 ////////////////////////////////////////////////////////////////////////////////
 // SAMPLING FUNCTIONS
@@ -273,7 +352,40 @@ void parseCommand(char* command) {
     Serial.println(FFT_SIZE);
   }
   GET_AND_SET(SAMPLE_RATE_HZ)
-  GET_AND_SET(TONE_ERROR_MARGIN_HZ)
-  GET_AND_SET(TONE_WINDOW_MS)
-  GET_AND_SET(TONE_THRESHOLD_DB)
+  GET_AND_SET(LEDS_ENABLED)
+  GET_AND_SET(SPECTRUM_MIN_DB)
+  GET_AND_SET(SPECTRUM_MAX_DB)
+  
+  // Update spectrum display values if sample rate was changed.
+  if (strstr(command, "SET SAMPLE_RATE_HZ ") != NULL) {
+    spectrumSetup();
+  }
+  
+  // Turn off the LEDs if the state changed.
+  if (LEDS_ENABLED == 0) {
+    for (int i = 0; i < NEO_PIXEL_COUNT; ++i) {
+      pixels.setPixelColor(i, 0);
+    }
+    pixels.show();
+  }
+}
+
+//Used to determine the frequency of the signal being read on the ADC
+void signalAnalysis(){ 
+    // read back fundamental frequency
+    if (signalFreq.available()) {
+        float note = signalFreq.read();
+        float prob = signalFreq.probability();
+        Serial.printf("Note: %3.2f | Probability: %.2f\n", note, prob);
+    }   
+}
+
+//Play a waveform on the SD Card 
+void startPlaying() {
+  playRaw1.play("wav1.dat");
+}
+
+//Stop playing a waveform on the SD Card 
+void stopPlaying() {
+  playRaw1.stop();
 }
